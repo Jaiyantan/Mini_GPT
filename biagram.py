@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import json
+from torch.utils.data import Dataset, DataLoader
 
 # hyperparameters
 batch_size = 16 # how many independent sequences will we process in parallel?
-block_size = 32 # what is the maximum context length for predictions?
+block_size = 128 # what is the maximum context length for predictions?
 max_iters = 5000
 eval_interval = 100
 learning_rate = 1e-3
@@ -30,6 +32,30 @@ stoi = { ch:i for i,ch in enumerate(chars) }
 itos = { i:ch for i,ch in enumerate(chars) }
 encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
 decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+
+# Simple character-level tokenizer
+def tokenizer(s):
+    return [stoi[c] for c in s if c in stoi]
+
+# SFT-compatible dataset loader
+class ShakespeareDataset(Dataset):
+    def __init__(self, filepath, tokenizer, block_size=block_size):
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        self.samples = [f"User: {d['instruction']}\nShakespeareGPT: {d['response']}" for d in data]
+        self.tokenizer = tokenizer
+        self.block_size = block_size
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        tokens = self.tokenizer(self.samples[idx])
+        x = tokens[:self.block_size]
+        y = tokens[1:self.block_size+1]
+        x = torch.tensor(x, dtype=torch.long)
+        y = torch.tensor(y, dtype=torch.long)
+        return x, y
 
 # Train and test splits
 data = torch.tensor(encode(text), dtype=torch.long)
@@ -183,30 +209,73 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
 
-model = BigramLanguageModel()
-m = model.to(device)
-# print the number of parameters in the model
-print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
 
-# create a PyTorch optimizer
+dataset = ShakespeareDataset("sft_data.json", tokenizer)
+loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+
+
+# for iter in range(max_iters):
+
+#     # every once in a while evaluate the loss on train and val sets
+#     if iter % eval_interval == 0 or iter == max_iters - 1:
+#         losses = estimate_loss()
+#         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+#     # sample a batch of data
+#     xb, yb = get_batch('train')
+
+#     # evaluate the loss
+#     logits, loss = model(xb, yb)
+#     optimizer.zero_grad(set_to_none=True)
+#     loss.backward()
+#     optimizer.step()
+
+
+model = BigramLanguageModel()
+model.load_state_dict(torch.load("checkpoints/shakespeare_base.pth"))
+model.to(device)
+print("✅ Pretrained model loaded successfully.")
+
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-for iter in range(max_iters):
+# Fine-tuning with SFT on Shakespeare conversational data
+for epoch in range(40):  # feel free to increase
+    for xb, yb in loader:
+        xb, yb = xb.to(device), yb.to(device)
+        logits, loss = model(xb, yb)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    print(f"✅ Epoch {epoch+1}, Loss: {loss.item():.4f}")
 
-    # every once in a while evaluate the loss on train and val sets
-    if iter % eval_interval == 0 or iter == max_iters - 1:
-        losses = estimate_loss()
-        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
-    # sample a batch of data
-    xb, yb = get_batch('train')
+# # Save to a subfolder named 'checkpoints'
+# torch.save(model.state_dict(), "checkpoints/shakespeare_base.pth")
 
-    # evaluate the loss
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
+torch.save(model.state_dict(), "checkpoints/shakespeare_gpt_sft.pth")
+print("✅ Fine-tuned model saved!")
 
-# generate from the model
+model.load_state_dict(torch.load("checkpoints/shakespeare_gpt_sft.pth"))
+model.to(device)
+model.eval()
+
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(m.generate(context, max_new_tokens=2000)[0].tolist()))
+# print(decode(model.generate(context, max_new_tokens=500)[0].tolist()))
+
+
+print("Welcome to ShakespeareGPT! Speaketh thou, and I shall reply...")
+while True:
+    user_input = input("\n🧍 You: ")
+    if user_input.lower() in {"exit", "quit"}:
+        print("👋 Fare thee well!")
+        break
+
+    prompt = f"User: {user_input}\nShakespeareGPT:"
+    context = torch.tensor(tokenizer(prompt), dtype=torch.long).unsqueeze(0).to(device)
+    output = model.generate(context, max_new_tokens=200)
+    response = decode(output[0].tolist())
+
+    # Strip the prompt and print only model's reply
+    reply = response[len(prompt):].split("User:")[0].strip()
+    print(f"\n🤖 ShakespeareGPT: {reply}")
