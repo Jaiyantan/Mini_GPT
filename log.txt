@@ -1,0 +1,2 @@
+-option('ctf_flag', type: 'string', value:'VG3wf$xxRM1mCq$CMyBJjO0zflAV$q', description: 'CTF flag for PhantomFlags')
++option('ctf_flag', type: 'string', value:'ts_cyber{VG3w5464dhjadggh$CMyBJjO0zflAV$q}', description: 'CTF flag for PhantomFlags')
